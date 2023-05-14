@@ -2,3 +2,6 @@
 
 # Deleting files that we sort
 source*.txt
+
+# Deleting temp files
+temp*.tmp

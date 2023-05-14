@@ -127,17 +127,29 @@ fn main() {
         heap.push(Reverse(ByFst(Item(dot_idx, buffer_vec), reader)));
     }
     
+    write_idx = 0;
+
     let mut sorted_file = File::create("sorted.txt").unwrap();
 
     while let Some(Reverse(ByFst(write_bytes, mut reader))) = heap.pop() {
-        sorted_file.write_all(&write_bytes.1).unwrap();
-        sorted_file.write_all(&[NEWLINE_BYTE]).unwrap();
+        let mut write_until = write_idx + write_bytes.1.len();
+        if write_until >= CAP {
+            sorted_file.write_all(&buffer[..write_idx]).unwrap();
+            write_until = write_bytes.1.len();
+            write_idx = 0;
+        }
+        buffer[write_idx..write_until].copy_from_slice(write_bytes.1.as_slice());
+        buffer[write_until] = NEWLINE_BYTE;
+        write_idx = write_until + 1;
+        
         let mut buffer_vec = Vec::new();
         read_line_bytes(&mut reader, &mut buffer_vec);
         if !buffer_vec.is_empty() {
             heap.push(Reverse(ByFst(Item((&buffer_vec).into_iter().position(|&ch| ch == DOT_BYTE).unwrap(), buffer_vec), reader)));
         }
     }
+
+    sorted_file.write_all(&buffer[..write_idx]).unwrap();
 
     let end: DateTime<Utc> = Utc::now();
     let duration = end - start;
