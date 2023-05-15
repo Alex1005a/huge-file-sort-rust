@@ -1,6 +1,7 @@
-use std::{fs::{File, self}, io::{Read, Write, BufReader, BufRead}, collections::BinaryHeap, cmp::{Ordering, Reverse}};
+use std::{fs::{File, self}, io::{Read, Write, BufReader, BufRead}, collections::BinaryHeap, cmp::{Ordering, Reverse}, thread, sync::atomic::{AtomicI64, self}};
 use std::str;
 use chrono::{DateTime, Utc};
+use crossbeam_channel::{bounded};
 use itertools::Itertools;
 
 pub struct ByFst<T, V>(pub T, pub V);
@@ -58,13 +59,16 @@ fn process_buffer(file: &mut File, buffer: &[u8]) {
         split_buffer
             .into_iter()
             .map(|b| Item((&b).into_iter().position(|&ch| ch == DOT_BYTE).unwrap(), b))
-            .sorted()
             .collect_vec();
     sorted_strings.sort_by(|a, b| a.cmp(b));
-    for write_item in sorted_strings {
-        file.write_all(&write_item.1).unwrap();
-        file.write_all(&[NEWLINE_BYTE]).unwrap();
-    }
+    
+    let all_bytes = sorted_strings.iter().fold(Vec::new(), |mut vec, item: &Item| {
+        vec.extend_from_slice(&item.1);
+        vec.push(NEWLINE_BYTE);
+        vec
+    });
+
+    file.write_all(&all_bytes).unwrap();
 }
 
 fn read_line_bytes(reader: &mut BufReader<File>, buffer: &mut Vec<u8>){
@@ -81,43 +85,58 @@ fn main() {
     let file_path = "source.txt";
     let mut old_file = File::open(file_path).unwrap();
 
-    const CAP: usize = 100 * 1024 * 1024;
+    const CAP: usize =  100 * 1024 * 1024;
     let mut v: Vec<u8> = vec![0; CAP];
     let buffer = v.as_mut_slice();
 
     let mut write_idx = 0;
-    let mut chunk_files: i32 = 1;
 
     let start: DateTime<Utc> = Utc::now();
 
-    loop {
-        let mut output_file = File::create(format!("temp{}.tmp", chunk_files)).unwrap();
-        chunk_files += 1;
+    let chunk_files = AtomicI64::new(1);
+    let (tx, rx) = bounded::<Vec<u8>>(1);
 
-        let length = old_file.read(&mut buffer[write_idx..]).unwrap();
-        if length < CAP - write_idx {
-            process_buffer(&mut output_file, &buffer[..(write_idx + length)]);
-            break;
+    thread::scope(|s| {
+        for _ in 1..3 {
+            let rx = rx.clone();
+            s.spawn(|| {
+                for buf in rx {
+                    let chunk_files = chunk_files.fetch_add(1, atomic::Ordering::Relaxed);
+                    let mut output_file = File::create(format!("temp{}.tmp", chunk_files)).unwrap();
+                    process_buffer(&mut output_file, &buf);
+                }
+            });
         }
-
-        let read_until: usize;
-
-        if let Some(idx) = buffer.into_iter().rposition(|&mut b| b == NEWLINE_BYTE || b == R_BYTE) {
-            write_idx = CAP - idx;
-            read_until = idx;
-        } else {
-            write_idx = 0;
-            read_until = CAP;
-        }
-
-        process_buffer(&mut output_file, &buffer[..read_until]);
-        let mut remain = Vec::new();
-        remain.write_all(&buffer[read_until..]).unwrap();
-        buffer[..write_idx].clone_from_slice(&remain);
-    }
+        s.spawn(|| {
+            loop {
+                let length = old_file.read(&mut buffer[write_idx..]).unwrap();
+                if length < CAP - write_idx {
+                    tx.send((&buffer[..(write_idx + length)]).to_vec()).unwrap();
+                    drop(tx);
+                    break;
+                }
+        
+                let read_until: usize;
+        
+                if let Some(idx) = buffer.into_iter().rposition(|&mut b| b == NEWLINE_BYTE || b == R_BYTE) {
+                    write_idx = CAP - idx;
+                    read_until = idx;
+                } else {
+                    write_idx = 0;
+                    read_until = CAP;
+                }
+                
+                tx.send((&buffer[..read_until]).to_vec()).unwrap();
+                let mut remain = Vec::new();
+                remain.write_all(&buffer[read_until..]).unwrap();
+                buffer[..write_idx].clone_from_slice(&remain);
+            }
+        });
+    });
 
     let mut heap = BinaryHeap::new();
-    
+    let chunk_files = chunk_files.load(atomic::Ordering::Relaxed);
+
     for i in 1 .. chunk_files {
         let temp_file = File::open(format!("temp{}.tmp", i)).unwrap();
         let mut reader = BufReader::new(temp_file);
