@@ -85,6 +85,7 @@ fn main() {
     let file_path = "source.txt";
     let mut old_file = File::open(file_path).unwrap();
 
+    const DEGREE_OF_PARALLELISM: usize = 3;
     const CAP: usize =  100 * 1024 * 1024;
     let mut v: Vec<u8> = vec![0; CAP];
     let buffer = v.as_mut_slice();
@@ -97,7 +98,7 @@ fn main() {
     let (tx, rx) = bounded::<Vec<u8>>(1);
 
     thread::scope(|s| {
-        for _ in 1..3 {
+        for _ in 1..DEGREE_OF_PARALLELISM {
             let rx = rx.clone();
             s.spawn(|| {
                 for buf in rx {
